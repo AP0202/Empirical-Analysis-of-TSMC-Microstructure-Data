@@ -1,0 +1,263 @@
+---
+title: "Project"
+author: "Kevin Herbst, Abhishek Panchal, Zach Orrico, Muhammad Elfayoumi"
+date: "2024-12-03"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE)
+```
+
+# Loading and Cleaning Data
+```{r}
+library(xts)
+library(highfrequency)
+library(data.table)
+
+options(digits.secs=3)
+Sys.setenv(TZ='America/New_York')
+
+# # Loading Refinitiv data
+# data <- read.csv("TSM_TickHistoryTimeandSales_20241017.csv")
+# data <- data[-c(1:6),]
+# 
+# # Subsetting into trades and quotes
+# tdata <- subset(data, Type == "Trade")
+# qdata <- subset(data, Type == "Quote")
+# 
+# # Removing T in dates and pulling columns we want
+# tdata2 <- data.frame(DT = gsub("T", " ", tdata$Date.Time, perl = TRUE),
+#                           SYMBOL = "TSM",
+#                           PRICE = tdata$Price,
+#                           SIZE = tdata$Volume,
+#                           EX = tdata$Ex.Cntrb.ID)
+# 
+# qdata2 <- data.frame(DT = gsub("T", " ", qdata$Date.Time, perl = TRUE),
+#                           SYMBOL = "TSM",
+#                           BID = qdata$Bid.Price,
+#                           BIDSIZ = qdata$Bid.Size,
+#                           OFR = qdata$Ask.Price,
+#                           OFRSIZ = qdata$Ask.Size)
+# 
+# tdata3 <- data.frame(DT = gsub("-04", "", tdata2$DT, perl = TRUE),
+#                           SYMBOL = "TSM",
+#                           PRICE = tdata$Price,
+#                           SIZE = tdata$Volume,
+#                           EX = tdata$Ex.Cntrb.ID)
+# 
+# qdata3 <- data.frame(DT = gsub("-04", "", qdata2$DT, perl = TRUE),
+#                           SYMBOL = "TSM",
+#                           BID = qdata$Bid.Price,
+#                           BIDSIZ = qdata$Bid.Size,
+#                           OFR = qdata$Ask.Price,
+#                           OFRSIZ = qdata$Ask.Size)
+# 
+# # Formatting dates
+# tdata3$DT <- as.POSIXct(tdata3$DT, format = "%Y-%m-%d %H:%M:%OS", tz = "America/New_York")
+# qdata3$DT <- as.POSIXct(qdata3$DT, format = "%Y-%m-%d %H:%M:%OS", tz = "America/New_York")
+# 
+# # Merging times
+# tdata4 <- mergeTradesSameTimestamp(as.data.table(tdata3))
+# qdata4 <- mergeQuotesSameTimestamp(as.data.table(qdata3))
+# 
+# # Merging trade and quote data
+# tqdata <- matchTradesQuotes(as.data.table(tdata4), as.data.table(qdata4))
+# 
+# # Saving as RData file
+# save(tqdata, file = "taqdata_TSM_20241017.RData")
+
+load("taqdata_TSM_20241017.RData")
+```
+
+# Data Analysis
+```{r}
+library(dplyr)
+library(lubridate)
+
+tqdata$SIDE <- getTradeDirection(tqdata)
+
+# Filtering for active trading hours
+tqdata_active <- tqdata %>%
+  filter(format(DT, "%H:%M:%S") >= "09:30:00" & format(DT, "%H:%M:%S") <= "16:00:00")
+
+n_trades <- nrow(tqdata)
+cat("Total Number of Trades:", n_trades, "\n")
+n_trades_active <- nrow(tqdata_active)
+cat("Total Number of Trades During Trading Hours:", n_trades_active, "\n")
+
+ex_trades <- as.data.frame(table(tqdata$EX))
+ex_trades <- ex_trades[-1,]
+ex_trades <- ex_trades[order(-ex_trades$Freq),]
+colnames(ex_trades) <- c("Exchange", "Frequency")
+print(format(ex_trades, justify = "right"))
+
+ex_trades_active <- as.data.frame(table(tqdata_active$EX))
+ex_trades_active <- ex_trades_active[-1,]
+ex_trades_active <- ex_trades_active[order(-ex_trades_active$Freq),]
+colnames(ex_trades_active) <- c("Exchange", "Frequency")
+print(format(ex_trades_active, justify = "right"))
+```
+
+# Liquidity Analysis
+```{r}
+# Filtering for ADF
+tqdata_active_adf <- tqdata_active[tqdata_active$EX == "ADF"]
+
+# Filtering for hourly data
+hours <- list(hr1 = c("09:30:00", "10:30:00"),
+              hr2 = c("10:30:00", "11:30:00"),
+              hr3 = c("11:30:00", "12:30:00"),
+              hr4 = c("12:30:00", "13:30:00"),
+              hr5 = c("13:30:00", "14:30:00"),
+              hr6 = c("14:30:00", "15:30:00"),
+              hr7 = c("15:30:00", "16:00:00"))
+
+hr_data <- list()
+for (name in names(hours)) {
+  filtered_data <- tqdata_active_adf %>%
+    filter(format(DT, "%H:%M:%S") >= hours[[name]][1] & format(DT, "%H:%M:%S") < hours[[name]][2])
+  hr_data[[name]] <- filtered_data
+}
+hr_data <- lapply(hr_data, as.data.table)
+
+mean_liquidity_measures <- function(data) {
+  liqMeasures <- getLiquidityMeasures(data)
+  liqMeas_spreads <- c(mean(liqMeasures$quotedSpread),
+                       mean(liqMeasures$effectiveSpread, na.rm = TRUE),
+                       mean(liqMeasures$realizedSpread, na.rm = TRUE))
+  return(liqMeas_spreads)
+}
+
+liqMeas_active <- mean_liquidity_measures(tqdata_active_adf)
+liqMeas_active <- data.frame(t(liqMeas_active))
+colnames(liqMeas_active) <- c("Mean Quoted Spread", "Mean Effective Spread", "Mean Realized Spread")
+rownames(liqMeas_active) <- "Active Trading Hours"
+liqMeas_active
+
+liqMeas_hourly <- lapply(hr_data, mean_liquidity_measures)
+liqMeas_hourly <- data.frame(do.call(rbind, liqMeas_hourly))
+colnames(liqMeas_hourly) <- c("Mean Quoted Spread", "Mean Effective Spread", "Mean Realized Spread")
+rownames(liqMeas_hourly) <- c("Hour 1", "Hour 2", "Hour 3", "Hour 4", "Hour 5", "Hour 6", "Hour 7")
+liqMeas_hourly
+
+#jpeg("rplot1.jpeg")
+plot(1:7, liqMeas_hourly$`Mean Quoted Spread`, xlab = "Hour", ylab = "Mean Quoted Spread",
+     main = "Figure 5: TSM Average Quoted Spread by Hour")
+#dev.off()
+
+#jpeg("rplot2.jpeg")
+plot(1:7, liqMeas_hourly$`Mean Effective Spread`, xlab = "Hour", ylab = "Mean Effective Spread",
+     main = "Figure 6: TSM Average Effective Spread by Hour")
+#dev.off()
+
+#jpeg("rplot3.jpeg")
+plot(1:7, liqMeas_hourly$`Mean Realized Spread`, xlab = "Hour", ylab = "Mean Realized Spread",
+     main = "Figure 7: TSM Average Realized Spread by Hour")
+#dev.off()
+```
+
+# Volatility Estimate
+```{r}
+# Function to calculate roll model
+roll_model <- function(data, interval) {
+  pr <- na.omit(data$PRICE)
+  dpr <- diff(pr)
+  
+  covdpr <- acf(dpr, lag.max = 10, type = "covariance", plot = FALSE)
+  
+  gamma0 <- covdpr$acf[1]
+  gamma1 <- covdpr$acf[2]
+  
+  cparam <- sqrt(-gamma1)
+  
+  sig2u <- gamma0 + 2*gamma1
+  sigu <- sqrt(sig2u)
+  
+  ntrades <- length(pr)
+  
+  if (interval == "day") {
+    daily_vol <- sigu*sqrt(ntrades)
+    ann_vol <- daily_vol*sqrt(252)
+  }
+  if (interval == "hour") {
+    hourly_vol <- sigu*sqrt(ntrades)
+    daily_vol <- hourly_vol*sqrt(6.5)
+    ann_vol <- daily_vol*sqrt(252)
+    
+  }
+  
+  return(c(cparam, sigu, daily_vol, ann_vol))
+}
+
+
+vol_active <- roll_model(tqdata_active_adf, "day")
+vol_active <- data.frame(t(vol_active))
+colnames(vol_active) <- c("Trading Cost", "Efficient Price Volatility", "Daily Volatility", "Annual Volatility")
+rownames(vol_active) <- "Active Trading Hours"
+vol_active
+
+vol_hourly <- lapply(hr_data, function(data) roll_model(data, interval = "hour"))
+vol_hourly <- data.frame(do.call(rbind, vol_hourly))
+colnames(vol_hourly) <- c("Trading Cost", "Efficient Price Volatility", "Daily Volatility", "Annual Volatility")
+rownames(vol_hourly) <- c("Hour 1", "Hour 2", "Hour 3", "Hour 4", "Hour 5", "Hour 6", "Hour 7")
+vol_hourly
+```
+
+# PIN Estimate
+```{r}
+library(InfoTrad)
+
+# Pulling number of buy and sell trades from NYSE
+buys <- tqdata_active$NUMTRADES[tqdata_active$SIDE == 1 & tqdata_active$EX == "NYS"]
+buys <- na.omit(buys)
+sells <- tqdata_active$NUMTRADES[tqdata_active$SIDE == -1 & tqdata_active$EX == "NYS"]
+sells <- na.omit(sells)
+
+data <- cbind(buys, sells[1:6546])
+
+# Calibrating model
+par0 <- c(0.5,0.5,300,400,500)
+methods <- c("Nelder-Mead", "BFGS", "CG", "SANN")
+
+likelihoods <- c("LK", "EHO")
+
+YZ_greeks <- data.frame()
+for (l in likelihoods) {
+  model <- YZ(data, likelihood = l)
+  alpha <- model$alpha
+  delta <- model$delta
+  mu <- model$mu
+  eb <- model$epsilon_b
+  es <- model$epsilon_s
+  pin <- model$PIN
+  result <- c(alpha, delta, mu, eb, es, pin)
+  
+  YZ_greeks <- rbind(YZ_greeks, result)
+}
+
+GAN_greeks <- data.frame()
+for (l in likelihoods) {
+  model <- GAN(data, likelihood = l)
+  alpha <- model$alpha
+  delta <- model$delta
+  mu <- model$mu
+  eb <- model$epsilon_b
+  es <- model$epsilon_s
+  pin <- model$PIN
+  result <- c(alpha, delta, mu, eb, es, pin)
+  
+  GAN_greeks <- rbind(GAN_greeks, result)
+}
+
+fun_methods_YZ <- data.frame(c(rep("YZ", 2)), likelihoods)
+YZ_greeks <- cbind(fun_methods_YZ, YZ_greeks)
+colnames(YZ_greeks) <- c("Function", "Likelihood", "Alpha", "Delta", "Mu", "Eb", "Es", "PIN")
+
+fun_methods_GAN <- data.frame(c(rep("GAN", 2)), likelihoods)
+GAN_greeks <- cbind(fun_methods_GAN, GAN_greeks)
+colnames(GAN_greeks) <- c("Function", "Likelihood", "Alpha", "Delta", "Mu", "Eb", "Es", "PIN")
+
+greeks_summary <- rbind(YZ_greeks, GAN_greeks)
+greeks_summary
+```
